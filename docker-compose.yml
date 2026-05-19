@@ -1,0 +1,133 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: weather-ai-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-weather_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-weather_password}
+      POSTGRES_DB: ${DB_NAME:-weather_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-weather_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - weather-ai-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: weather-ai-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - weather-ai-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: weather-ai-backend
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 5000
+      DATABASE_URL: postgresql://${DB_USER:-weather_user}:${DB_PASSWORD:-weather_password}@postgres:5432/${DB_NAME:-weather_db}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-your_super_secret_jwt_key}
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/logs:/app/logs
+    networks:
+      - weather-ai-network
+    restart: unless-stopped
+
+  # Python ML Service
+  ml-service:
+    build:
+      context: ./ml-model
+      dockerfile: Dockerfile
+    container_name: weather-ai-ml
+    environment:
+      MODEL_PATH: /app/models/mimo_model.h5
+      DATA_PATH: /app/data/
+      BATCH_SIZE: 32
+      EPOCHS: 100
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ml-model/src:/app/src
+      - ./ml-model/models:/app/models
+      - ./ml-model/data:/app/data
+    networks:
+      - weather-ai-network
+    restart: unless-stopped
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: weather-ai-frontend
+    environment:
+      REACT_APP_API_URL: http://localhost:5000
+      REACT_APP_SOCKET_URL: http://localhost:5000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    networks:
+      - weather-ai-network
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: weather-ai-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - weather-ai-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  weather-ai-network:
+    driver: bridge
